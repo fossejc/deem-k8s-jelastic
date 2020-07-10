@@ -60,7 +60,7 @@ for (var i = 0; i < quotas.length; i++){
     }
 }
 var resp = {result:0};
-var url = "https://gitlab.com/public-thinkee/deem-k8s-jelastic/-/raw/master/configs/settings.yaml";
+var url = "https://raw.githubusercontent.com/fossejc/deem-k8s-jelastic/github/configs/settings.yaml";
 resp.settings = toNative(new org.yaml.snakeyaml.Yaml().load(new com.hivext.api.core.utils.Transport().get(url)));
 var f = resp.settings.fields;
 
