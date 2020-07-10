@@ -1,24 +1,4 @@
 fields:
-  - name: deploy
-    type: radio-fieldset
-    values:
-        - value: cc
-          caption: Clean cluster with pre-deployed HelloWorld example
-        - value: cmd
-          caption: Deploy custom helm or stack via shell command
-    default: cc
-    showIf:
-      cmd:
-        name: cmd
-        type: text
-        height: 65
-        required: true
-        hideLabel: true
-        default: |-
-          helm repo add ibm-charts https://raw.githubusercontent.com/IBM/charts/master/repo/stable/
-          helm install --name open-liberty --set autoscaling.enabled=true --set autoscaling.minReplicas=2 --set resources.constraints.enabled=true --set resources.requests.cpu=1000m --set resources.limits.cpu=1000m --set resources.requests.memory=512Mi --set resources.limits.memory=1Gi ibm-charts/ibm-open-liberty --debug
-          kubectl apply -f https://raw.githubusercontent.com/jelastic-jps/kubernetes/v1.17.4/addons/ingress/openliberty.yaml
-
   - name: label
     caption: Topology
     type: displayfield
@@ -38,17 +18,6 @@ fields:
     hidden: true
     markup:
 
-  - name: ingress-controller
-    type: list
-    caption: Ingress Controller
-    values:
-      Nginx: Nginx
-      HAProxy: HAProxy
-      Traefik: Traefik
-    default: Nginx
-    hideLabel: false
-    editable: false
-
   - name: dashboard
     type: list
     caption: Kubernetes Dashboard
@@ -63,30 +32,6 @@ fields:
     name: storage
     caption: Attach dedicated NFS Storage with dynamic volume provisioning
     value: true
-    showIf:
-      true:
-      - type: checkbox
-        name: monitoring
-        caption: Install Prometheus & Grafana
-        value: false
-
-      - type: checkbox
-        name: jaeger
-        caption: Install Jaeger tracing tools
-        value: false
-
-      false:
-      - type: checkbox
-        name: monitoring
-        caption: Install Prometheus & Grafana
-        value: false
-        disabled: true
-
-      - type: checkbox
-        name: jaeger
-        caption: Install Jaeger tracing tools
-        value: false
-        disabled: true
 
   - type: checkbox
     name: api

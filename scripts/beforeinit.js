@@ -61,7 +61,9 @@ for (var i = 0; i < quotas.length; i++){
 }
 var resp = {result:0};
 var url = "https://gitlab.com/public-thinkee/deem-k8s-jelastic/-/raw/master/configs/settings.yaml";
+console.log("url", url)
 resp.settings = toNative(new org.yaml.snakeyaml.Yaml().load(new com.hivext.api.core.utils.Transport().get(url)));
+console.log("resp", resp)
 var f = resp.settings.fields;
 
 if (!prod && !dev){
