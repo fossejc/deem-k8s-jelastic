@@ -12,7 +12,7 @@ var resp = {
     scalingMode: "stateless",
     nodeGroup: "k8sm",
     isRedeploySupport: false,
-    addons: ["conf-k8s-addon", "upgrade-k8s-addon", "gitlab-k8s-addon", "certman-k8s-addon"],
+    addons: [],
     displayName: "Master",
     extip: false,
     env: {
@@ -32,19 +32,6 @@ var resp = {
       JELASTIC_EXPOSE: false
     }
   }]
-}
-
-if (k8smCount > 1) {
-  resp.nodes.push({
-    count: 2,
-    nodeType: "haproxy",
-    cloudlets: 8,
-    displayName: "API Balancer",
-    nodeGroup: "mbl",
-    env: {
-      JELASTIC_PORTS: 6443
-    }
-  })
 }
 
 if ('${settings.storage}' == 'true') {
