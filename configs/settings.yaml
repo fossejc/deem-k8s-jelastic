@@ -1,4 +1,13 @@
 fields:
+  - name: deploy
+    type: radio-fieldset
+    values:
+        - value: cc
+          caption: Clean cluster with pre-deployed HelloWorld example
+        - value: cmd
+          caption: Deploy custom helm or stack via shell command
+    default: cc
+
   - name: label
     caption: Topology
     type: displayfield
