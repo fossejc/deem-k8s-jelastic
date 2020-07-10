@@ -27,7 +27,7 @@ var resp = {
     displayName: "Workers",
     cloudlets: 32,
     isRedeploySupport: false,
-    extip: ${settings.extip:false},
+    extip: false,
     env: {
       JELASTIC_EXPOSE: false
     }
