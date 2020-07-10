@@ -1,0 +1,265 @@
+type: install
+version: 1.5
+id: kubernetes
+baseUrl: https://gitlab.com/public-thinkee/deem-k8s-jelastic/-/raw/master
+description:
+  text: /text/description-kube.md
+  short: Kubernetes cluster with automated scaling & cost efficient pay-per-use pricing for running cloud-native microservices.
+categories:
+  - apps/clusters
+  - apps/dev-and-admin-tools
+
+logo: /images/k8s-logo.png
+name: Kubernetes Cluster
+targetRegions:
+  type: vz7
+
+ssl: true
+onBeforeInit: /scripts/beforeinit.js
+onBeforeInstall: /scripts/beforeinstall.js
+
+nodes: definedInOnBeforeInstall
+
+skipNodeEmails: true
+
+globals:
+    dashboardUrl:  https://${env.domain}/kubernetes-dashboard/
+
+onInstall:
+  - block-masters-scaling
+  - prepare-instances
+  - init-main-master
+  - init-slave-masters
+  - connect-workers: cp
+  - apply-worker-integration: cp
+  - setup-overlay
+  - configure-remote-api
+  - install-components
+  - install-helm-master
+  - generate-admin-token
+  - helm-components
+
+  - if (${settings.api:true}):
+      - setup-remote-api: true
+
+  - if (${settings.monitoring:false}):
+        - install-monitoring
+
+  - if ('${env.protocol}' == 'http'):
+      - api: env.control.AddEndpoint
+        nodeId: ${nodes.cp.master.id}
+        privatePort: 30777
+        protocol: TCP
+        name: Dashboard Self-Signed HTTPS
+      - setGlobals:
+          dashboardUrl: https://node${nodes.cp.master.id}-${env.domain}:${response.object.publicPort}/
+
+  - setGlobals:
+        default_success: |
+             Enter [Kubernetes dashboard](${globals.dashboardUrl}) ${globals.default_api:} using the Access Token:
+
+             ```${globals.token}```
+             Press **Open in Browser** to view a default web page of your application.
+             To bind a custom domain name with your Kubernetes cluster please refer to the steps described in Jelastic [documentation](https://docs.jelastic.com/custom-domains).
+  - check-health
+
+onAfterScaleOut[cp]:
+  - cmd[${nodes.k8sm.master.id}]: |-
+      token_age=$(expr $(date +%s) - $(stat /var/log/kubeadm-init.log -c %Y))
+      [ ${token_age} -lt $((20*60*60)) ] && { sed -n '/kubeadm join/,/^$/{/./p}' /var/log/kubeadm-init.log | sed ':a;N;$!ba;s/\\\n//g' | grep -v 'control-plane'; } || { kubeadm token create --print-join-command; }
+  - setGlobals:
+      worker_join_cmd: ${response.out}
+  - set:
+      nodes: ${event.response.nodes.join(id,)}
+  - prepare-worker-integration
+  - cmd [${this.nodes}]: init-instance.sh --type=worker --base-url=$(echo '${baseUrl}' | base64 -w 0)
+  - connect-workers: ${this.nodes}
+  - apply-worker-integration: ${this.nodes}
+
+onBeforeScaleIn[cp]:
+  forEach(event.response.nodes):
+    removeWorker:
+      workerHostname: node${@i.id}-${env.domain}
+
+onBeforeClone:
+  stopEvent:
+    type: warning
+    message: Kubernetes Cluster cloning is not supported yet!
+
+onBeforeAttachExtIp[k8sm]: block-ip-assignment
+
+onBeforeAttachExtIp[mbl]: block-ip-assignment
+
+onBeforeSetExtIpCount[k8sm]: block-ip-assignment
+
+onBeforeSetExtIpCount[mbl]: block-ip-assignment
+
+onAfterSetExtIpCount[cp]:
+  - log: 'attached ips: ${event.response.attachedIps.join(,)}, detached ips: ${event.response.detachedIps.join(,)}'
+  - cmd[${nodes.k8sm.master.id}]: metallb-config -a '${event.response.attachedIps.join(,)}' -d '${event.response.detachedIps.join(,)}'
+  - cmd[cp]: systemctl restart kube-config.service
+
+onBeforeDetachExtIp[cp]:
+  - log: 'detached ip: ${event.params.ip}'
+  - cmd[${nodes.k8sm.master.id}]: metallb-config -d '${event.params.ip}'
+  - cmd[cp]: systemctl restart kube-config.service
+
+onAfterAttachExtIp[cp]:
+  - if (${event.response.result:1} == 0):
+      - log: 'attached ip: ${event.response.object}'
+      - cmd[${nodes.k8sm.master.id}]: metallb-config -a '${event.response.object}'
+      - cmd[cp]: systemctl restart kube-config.service
+
+actions:
+  block-masters-scaling:
+    env.control.ApplyNodeGroupData[k8sm]:
+      data:
+        validation:
+          minCount: ${nodes.k8sm.length}
+          maxCount: ${nodes.k8sm.length}
+
+  block-ip-assignment:
+    stopEvent:
+      type: warning
+      message: Kubernetes service instances shouldn't have external IPs assigned.
+
+  prepare-instances:
+    execCmd:
+      - nodeGroup: k8sm
+        commands: init-instance.sh --type=master --base-url=$(echo '${baseUrl}' | base64 -w 0)
+      - nodeGroup: cp
+        commands: init-instance.sh --type=worker --base-url=$(echo '${baseUrl}' | base64 -w 0)
+    user: root
+    sync: false
+
+  prepare-worker-integration:
+    - cmd[${nodes.k8sm.master.id}]: tar zcfv - /var/lib/kubelet/worker-data 2>/dev/null | base64 -w 0
+    - setGlobals:
+        worker_integration: ${response.out}
+
+  apply-worker-integration:
+    - cmd[${this}]: |-
+        mkdir /var/lib/worker &>/dev/null || rm -rf /var/lib/worker/*
+        echo '${globals.worker_integration}' | base64 -d | tar zxv --strip-components=4 -C /var/lib/worker
+        screen -d -m /usr/bin/bash -c '/usr/local/sbin/worker-integration.sh &>/var/log/kubernetes/k8s-worker-integration.log'
+
+  init-main-master:
+    - if (${nodes.mbl.length:0}):
+        cmd[mbl]: |-
+          sed -i '/^<\/mappings>.*/i \\t<pair frontend_port="6443" backend_port="6443" description="CPlane balancing" option="tcp-check" params="check fall 3 rise 2">' /etc/haproxy/tcpmaps/mappings.xml
+          sed -i 's/^bind :::80/#bind :::80/g' /etc/haproxy/haproxy.cfg
+          sed -i '/^daemon$/a stats socket /var/run/haproxy.sock mode 660 level admin' /etc/haproxy/haproxy.cfg
+          sed -i '/^daemon$/a stats timeout 2m' /etc/haproxy/haproxy.cfg
+          echo '${nodes.k8sm.master.intIP}' > /etc/haproxy/hosts
+          jem balancer rebuildCommon
+        user: root
+    - cmd[${nodes.k8sm.master.id}]: |-
+        systemctl daemon-reload > /dev/null 2>&1
+        systemctl restart systemd-journald.service
+        entryPoint=$((( ${nodes.mbl.length:0} > 0 )) && echo mbl || echo k8sm)
+        sed -i "s/^controlPlaneEndpoint:.*/controlPlaneEndpoint: \"${entryPoint}.${env.domain}:6443\"/g" /etc/kubernetes/custom-kubeadm.yaml
+        while true; do [ -f "/tmp/jelastic-init-mark" ] && break; echo "Waiting for cluster initial configuration"; sleep 3; done
+        kubeadm init --config /etc/kubernetes/custom-kubeadm.yaml --upload-certs --ignore-preflight-errors=swap,numcpu | tee /var/log/kubeadm-init.log
+        mkdir /var/lib/kubelet/worker-data
+    - configure-master: ${nodes.k8sm.master.id}
+    - cmd[${nodes.k8sm.master.id}]: sed -n '/kubeadm join/,/^$/{/./p}' /var/log/kubeadm-init.log | sed ':a;N;$!ba;s/\\\n//g' | grep 'control-plane'
+    - setGlobals:
+        master_join_cmd: ${response.out}
+    - cmd[${nodes.k8sm.master.id}]: sed -n '/kubeadm join/,/^$/{/./p}' /var/log/kubeadm-init.log | sed ':a;N;$!ba;s/\\\n//g' | grep -v 'control-plane'
+    - setGlobals:
+        worker_join_cmd: ${response.out}
+    - prepare-worker-integration
+    - if (${settings.api:true}):
+        - setGlobals:
+            default_api: or [Remote API Endpoint](${env.protocol}://${env.domain}/api/)
+
+  init-slave-masters:
+    - script: |
+        return {
+          result : 0,
+          nodes: '${nodes.k8sm.join(id,)}'.replace(/\b${nodes.k8sm.master.id},?\b/, '').replace(/,$/, '').split(','),
+          ips: '${nodes.k8sm.join(intIP,)}'.replace(/\b${nodes.k8sm.master.intIP},?\b/, '').replace(/,/g, ' ')
+        };
+    - setGlobals:
+        k8sm-slave-ids: ${response.nodes.join(,)}
+        k8sm-slave-ips: ${response.ips}
+    - if ('${globals.k8sm-slave-ids}'):
+      - forEach(node:response.nodes):
+          - cmd[${@node}]: |-
+              sleep 5
+              while true; do [ -f "/tmp/jelastic-init-mark" ] && break; echo "Waiting for cluster initial configuration"; sleep 3; done
+              systemctl daemon-reload > /dev/null 2>&1
+              systemctl restart systemd-journald.service
+              ${globals.master_join_cmd} --ignore-preflight-errors=swap,numcpu | tee /var/log/kubeadm-join.log
+      - configure-master: ${globals.k8sm-slave-ids}
+      - add-master-balancer: ${globals.k8sm-slave-ips}
+
+  configure-master:
+    cmd[${this}]: |-
+      mkdir -p $HOME/.kube
+      cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+      chown root:root $HOME/.kube/config
+      systemctl enable kubelet.service
+      /usr/local/sbin/k8sm-config -f
+      while true; do [ -f "/tmp/jelastic-conf-mark" ] && break; echo "Waiting for cluster bootstrap configuration"; sleep 3; done
+      /usr/local/sbin/master-postconfig.sh
+
+  add-master-balancer:
+    - cmd[mbl]: |-
+        for item in ${this}; do echo "${item}" >> /etc/haproxy/hosts; done
+        jem balancer rebuildCommon
+      user: root
+
+  connect-workers:
+    - cmd[${this}]: |-
+        while true; do [ -f "/tmp/jelastic-conf-mark" ] && break; echo "Waiting for cluster bootstrap configuration"; sleep 3; done
+        local_ip=$(/usr/sbin/ip route get 1.2.3.4 | grep -v 'cache' | uniq | head -n 1 | sed -n 's/.* src \([^ ]*\).*/\1/p')
+        [ -n "${local_ip}" ] || exit 1
+        local_ip_route="10.244.0.0/15 dev venet0 src ${local_ip}"
+        /usr/sbin/ip route add ${local_ip_route} && echo "${local_ip_route}" >> /etc/sysconfig/network-scripts/route-venet0
+        sed -i "/^KUBELET_EXTRA_ARGS/ s/\"$/ --node-ip=${local_ip}\"/" /etc/sysconfig/kubelet
+        systemctl daemon-reload > /dev/null 2>&1
+        systemctl restart systemd-journald.service
+        screen -d -m /usr/bin/bash -c '${globals.worker_join_cmd} --ignore-preflight-errors=swap,numcpu 1>/var/log/kubeadm-join.log 2>/var/log/kubeadm-join-error.log'
+        systemctl enable kubelet.service
+
+  setup-overlay:
+    cmd[${nodes.k8sm.master.id}]: |-
+      kubectl apply -f ${baseUrl}/addons/weave-pack.yaml
+
+  configure-remote-api:
+      - if (${settings.api:true}):
+          - setGlobals:
+              default_api: or [Remote API Endpoint](${env.protocol}://${env.domain}/api/)
+
+  install-components:
+    - cmd[${nodes.k8sm.master.id}]: /usr/local/sbin/install-components.sh --base-url=$(echo '${baseUrl}' | base64 -w 0) --admin-account=true --metallb=true --metrics-server=true --dashboard=${settings.dashboard:none} --ingress-name=${globals.ingress-dir}
+
+  install-helm-master:
+    cmd[${nodes.k8sm.master.id}]: |-
+      /usr/local/sbin/helm-install.sh
+
+  generate-admin-token:
+    - cmd[${nodes.k8sm.master.id}]: kubectl -n kube-system describe secret $(kubectl -n kube-system get secret | grep fulladmin | awk '{print $1}')  | grep 'token:' | sed -e's/token:\| //g'
+    - setGlobals:
+        token: ${response.out}
+
+  helm-components:
+    cmd[${nodes.k8sm.master.id}]: /usr/local/sbin/helm-components.sh --base-url=$(echo '${baseUrl}' | base64 -w 0) --nfs-provisioner=${settings.storage:false} --nfs-server=${nodes.storage.master.address:NULL}  --problem-detector=true
+
+  removeWorker:
+    cmd[${nodes.k8sm.master.id}]: |-
+      /usr/bin/kubectl drain ${this.workerHostname} --ignore-daemonsets --delete-local-data || exit 8;
+      /usr/bin/kubectl delete node ${this.workerHostname} || exit 9;
+
+  setup-remote-api:
+  - log: '${this}'
+  - cmd[${nodes.k8sm.master.id}]: |-
+      action=$([ "${this}" == "true" ] && echo "apply" || echo "delete")
+      kubectl $action -f ${baseUrl}/addons/ingress/${globals.ingress-dir}/api-ingress.yaml
+
+success: |
+  ${globals.default_success:}
+  ${globals.monitoring_success:}
+  ${globals.jaeger_success:}
+  ${globals.check_message:}
